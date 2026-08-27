@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>発注帳</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧾</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="gate" id="gate">
+  <div class="gate-card">
+    <span class="brand-eyebrow">ORDER LEDGER</span>
+    <h1>発注帳</h1>
+    <p>合言葉を入力してください。お店の担当者から共有されたものを入力すると、発注データにアクセスできます。</p>
+    <div id="gate-setup-notice" class="gate-setup-notice" hidden></div>
+    <form id="gate-form">
+      <input type="password" id="gate-passcode" name="passcode" placeholder="合言葉" autocomplete="off" required>
+      <button class="btn primary" type="submit">入る</button>
+      <span class="gate-error" id="gate-error"></span>
+    </form>
+  </div>
+</div>
+
+<div class="app-shell" id="app" hidden>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-eyebrow">ORDER LEDGER</span>
+      <h1>発注帳</h1>
+      <p class="brand-sub">コラボカフェの原価計算と発注個数をまとめて管理</p>
+    </div>
+    <div class="sync-status" id="sync-status">
+      <span class="sync-dot" id="sync-dot"></span>
+      <span id="sync-label">同期ずみ</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="表示切り替え">
+    <button class="tab-btn" id="tab-btn-order" role="tab" data-tab="order" aria-selected="true">発注シミュレーション</button>
+    <button class="tab-btn" id="tab-btn-products" role="tab" data-tab="products" aria-selected="false">商品ラインナップ<span class="tab-count" id="count-products"></span></button>
+    <button class="tab-btn" id="tab-btn-ingredients" role="tab" data-tab="ingredients" aria-selected="false">食材マスタ<span class="tab-count" id="count-ingredients"></span></button>
+  </nav>
+
+  <main id="main-content"></main>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
