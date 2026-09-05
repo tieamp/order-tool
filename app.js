@@ -952,6 +952,11 @@ function applyLiveInput(el) {
   }
 }
 
+// アプリ起動。
+init().catch((err) => {
+  console.error(err);
+});
+
 document.addEventListener('input', (e) => {
   if (e.isComposing || composing) return;
   applyLiveInput(e.target);
