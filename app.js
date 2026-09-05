@@ -38,18 +38,46 @@ async function apiWrite(action, payload) {
   return res.json();
 }
 
+// ---- Presets ---------------------------------------------------------
+const SUPPLIER_PRESETS = ['めいらく', 'UCC', 'ミクリード', '桶谷', 'Amazon', '楽天', '富澤商店'];
+const LEAD_TIME_PRESETS = ['翌日', '2日後', '3日後', '5日後', '1週間後', '2週間以上'];
+const TAG_PALETTE = ['#E7C6D9', '#C9E4DE', '#F6E4B6', '#C6DDF0', '#E3D5CA', '#D6E2E9', '#F1D1B5'];
+
+function leadTimeRank(lt) {
+  const idx = LEAD_TIME_PRESETS.indexOf(String(lt || ''));
+  return idx === -1 ? 999 : idx;
+}
+
+function tagColor(tag) {
+  const s = String(tag || '');
+  if (!s) return '#EDEDED';
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  return TAG_PALETTE[hash % TAG_PALETTE.length];
+}
+
+function datalistHtml(id, options) {
+  return '<datalist id="' + id + '">' + options.map((o) => '<option value="' + esc(o) + '">').join('') + '</datalist>';
+}
+
 // ---- App state --------------------------------------------------------
 let STATE = { ingredients: [], products: [] };
 let inFlight = false;
+let composing = false;
+let dragSource = null; // { kind: 'ingredient' | 'product', id }
 
 const ui = {
   activeTab: 'order',
   servings: {},
   productFilter: 'active',
+  productTagFilter: 'all',
+  productSearch: '',
   ingredientFilter: 'active',
   ingredientSearch: '',
-  editingProductName: null,
+  ingredientSort: 'manual',
+  editingProductId: null,
   editingIngredientId: null,
+  editingRecipeItem: null, // { productId, ingredientId }
   confirmDelete: null,
 };
 
@@ -142,7 +170,7 @@ function summaryStripHtml(plan) {
 }
 
 function renderOrderTab() {
-  const activeProducts = STATE.products.filter((p) => !p.archived).slice().sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+  const activeProducts = STATE.products.filter((p) => !p.archived).slice().sort((a, b) => a.sortOrder - b.sortOrder);
   const plan = computeOrderPlan();
   const supplierGroups = groupBySupplier(plan.rows);
 
@@ -155,15 +183,15 @@ function renderOrderTab() {
   if (activeProducts.length === 0) {
     html += emptyStateHtml('🍹', '提供中の商品がまだありません', '「商品ラインナップ」タブから商品を追加してください。');
   } else {
-    html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>商品名</th><th class="num">原価/食</th><th style="width:140px">食数</th><th class="num">小計原価</th></tr></thead><tbody>';
+    html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>商品名</th><th class="num">原価/食</th><th style="width:150px">食数</th><th class="num">小計原価</th></tr></thead><tbody>';
     activeProducts.forEach((p) => {
       const cost = productCostPerServing(p);
       const servingsVal = ui.servings[p.id] || '';
       const subtotal = cost * (Number(servingsVal) || 0);
       html += '<tr>';
-      html += '<td>' + esc(p.name) + '</td>';
+      html += '<td>' + esc(p.name) + (p.eventTag ? ' <span class="tag-pill" style="background:' + tagColor(p.eventTag) + '">' + esc(p.eventTag) + '</span>' : '') + '</td>';
       html += '<td class="num">' + yen(cost) + '</td>';
-      html += '<td><input type="number" min="0" step="1" inputmode="numeric" id="servings-' + p.id + '" data-bind="servings" data-id="' + p.id + '" value="' + esc(servingsVal) + '" placeholder="0" style="width:88px" class="num"></td>';
+      html += '<td><input type="number" min="0" step="1" inputmode="numeric" id="servings-' + p.id + '" data-bind="servings" data-id="' + p.id + '" value="' + esc(servingsVal) + '" placeholder="0" class="num servings-input"></td>';
       html += '<td class="num">' + (subtotal > 0 ? yen(subtotal) : '—') + '</td>';
       html += '</tr>';
     });
@@ -179,16 +207,14 @@ function renderOrderTab() {
     supplierGroups.forEach((entry) => {
       const supplier = entry[0];
       const rows = entry[1];
-      const groupCost = rows.reduce((s, r) => s + r.orderCost, 0);
-      html += '<div class="supplier-group"><div class="supplier-head"><span class="supplier-name">' + esc(supplier) + '</span><span class="supplier-meta">' + rows.length + '品目 ・ ' + yen(groupCost) + '</span></div>';
-      html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>食材名</th><th class="num">必要量</th><th class="num">仕入れ単位</th><th class="num">発注個数</th><th class="num">発注コスト</th><th>納品まで</th></tr></thead><tbody>';
+      html += '<div class="supplier-group"><div class="supplier-head"><span class="supplier-name">' + esc(supplier) + '</span><span class="supplier-meta">' + rows.length + '品目</span></div>';
+      html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>食材名</th><th class="num">必要量</th><th class="num">仕入れ単位</th><th class="num">発注個数</th><th>納品まで</th></tr></thead><tbody>';
       rows.forEach((r) => {
         html += '<tr>';
         html += '<td>' + esc(r.ingredient.name) + '</td>';
         html += '<td class="num">' + fmtNum(r.usage) + esc(r.ingredient.unit) + '</td>';
-        html += '<td class="num">' + fmtNum(r.ingredient.purchaseQty) + esc(r.ingredient.unit) + ' / ' + yen(r.ingredient.price) + '</td>';
+        html += '<td class="num">' + fmtNum(r.ingredient.purchaseQty) + esc(r.ingredient.unit) + '</td>';
         html += '<td class="num">' + r.units + '</td>';
-        html += '<td class="num">' + yen(r.orderCost) + '</td>';
         html += '<td>' + esc(r.ingredient.leadTime || '—') + '</td>';
         html += '</tr>';
       });
@@ -201,7 +227,7 @@ function renderOrderTab() {
 }
 
 function chipHtml(label, value, current, action) {
-  return '<button class="chip" data-action="' + action + '" data-value="' + value + '" aria-pressed="' + (current === value) + '">' + esc(label) + '</button>';
+  return '<button class="chip" data-action="' + action + '" data-value="' + esc(value) + '" aria-pressed="' + (current === value) + '">' + esc(label) + '</button>';
 }
 
 function deleteButtonHtml(kind, id) {
@@ -216,27 +242,52 @@ function ingredientSelectHtml() {
   if (sorted.length === 0) {
     return '<select name="ingredientId" disabled><option>先に食材を登録してください</option></select>';
   }
-  let html = '<select name="ingredientId" required><option value="">選択してください</option>';
+  let html = '<select name="ingredientId" class="recipe-ingredient-select" required><option value="">選択してください</option>';
   sorted.forEach((ing) => {
-    html += '<option value="' + ing.id + '">' + esc(ing.name) + (ing.archived ? '（アーカイブ）' : '') + '</option>';
+    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '">' + esc(ing.name) + (ing.archived ? '（アーカイブ）' : '') + '</option>';
   });
   html += '</select>';
   return html;
 }
 
-function productCardHtml(p) {
+function recipeRowHtml(p, item) {
+  const ing = STATE.ingredients.find((i) => i.id === item.ingredientId);
+  const editing = ui.editingRecipeItem && ui.editingRecipeItem.productId === p.id && ui.editingRecipeItem.ingredientId === item.ingredientId;
+  if (editing) {
+    return '<tr>' +
+      '<td>' + (ing ? esc(ing.name) : '<span class="badge-required">削除済みの食材</span>') + '</td>' +
+      '<td class="num"><input type="number" id="ri-usage-' + p.id + '-' + item.ingredientId + '" value="' + item.usage + '" min="0" step="any" style="width:80px" class="num"> ' + (ing ? esc(ing.unit) : '') + '</td>' +
+      '<td class="num">—</td>' +
+      '<td style="white-space:nowrap"><button class="btn sm primary" data-action="save-recipe-item" data-product-id="' + p.id + '" data-ingredient-id="' + item.ingredientId + '">保存</button> <button class="btn sm ghost" data-action="cancel-edit-recipe-item">戻す</button></td>' +
+      '</tr>';
+  }
+  const lineCost = ing ? unitCost(ing) * item.usage : 0;
+  return '<tr>' +
+    '<td>' + (ing ? esc(ing.name) : '<span class="badge-required">削除済みの食材</span>') + '</td>' +
+    '<td class="num">' + fmtNum(item.usage) + (ing ? esc(ing.unit) : '') + '</td>' +
+    '<td class="num">' + yen(lineCost) + '</td>' +
+    '<td style="white-space:nowrap">' +
+    '<button class="icon-btn" data-action="edit-recipe-item" data-product-id="' + p.id + '" data-ingredient-id="' + item.ingredientId + '" title="使用量を編集" aria-label="使用量を編集">✎</button>' +
+    '<button class="icon-btn" data-action="remove-recipe-item" data-product-id="' + p.id + '" data-ingredient-id="' + item.ingredientId + '" title="削除" aria-label="削除">✕</button>' +
+    '</td></tr>';
+}
+
+function productCardHtml(p, draggable) {
   const cost = productCostPerServing(p);
-  const editing = ui.editingProductName === p.id;
-  let html = '<div class="product-card" data-product-id="' + p.id + '">';
+  const editing = ui.editingProductId === p.id;
+  let html = '<div class="product-card" data-drag-id="' + p.id + '" data-drag-kind="product"' + (draggable ? ' draggable="true"' : '') + '>';
   html += '<div class="product-card-top">';
   html += '<div class="product-name-row">';
+  if (draggable) html += '<span class="drag-handle" title="ドラッグで並び替え">⠿</span>';
   if (editing) {
     html += '<input type="text" id="edit-product-name-' + p.id + '" value="' + esc(p.name) + '" style="font-family:var(--font-display);font-size:16px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;">';
-    html += '<button class="btn sm primary" data-action="save-product-name" data-id="' + p.id + '">保存</button>';
-    html += '<button class="btn sm ghost" data-action="cancel-edit-product-name">キャンセル</button>';
+    html += '<input type="text" id="edit-product-tag-' + p.id + '" value="' + esc(p.eventTag || '') + '" list="tag-presets" placeholder="コラボ回タグ（例：まほやくvol1）" style="font-size:13px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;">';
+    html += '<button class="btn sm primary" data-action="save-product-meta" data-id="' + p.id + '">保存</button>';
+    html += '<button class="btn sm ghost" data-action="cancel-edit-product-meta">キャンセル</button>';
   } else {
     html += '<span class="product-name">' + esc(p.name) + '</span>';
-    html += '<button class="icon-btn" data-action="edit-product-name" data-id="' + p.id + '" title="商品名を編集" aria-label="商品名を編集">✎</button>';
+    if (p.eventTag) html += '<span class="tag-pill" style="background:' + tagColor(p.eventTag) + '">' + esc(p.eventTag) + '</span>';
+    html += '<button class="icon-btn" data-action="edit-product-meta" data-id="' + p.id + '" title="商品名・タグを編集" aria-label="商品名・タグを編集">✎</button>';
     html += '<span class="pill ' + (p.archived ? 'archived' : 'active') + '">' + (p.archived ? 'アーカイブ' : '提供中') + '</span>';
   }
   html += '</div>';
@@ -256,22 +307,13 @@ function productCardHtml(p) {
   if (p.recipe.length === 0) {
     html += '<div class="recipe-empty">使用する食材がまだ登録されていません。下から追加してください。</div>';
   } else {
-    html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>食材</th><th class="num">使用量/食</th><th class="num">原価</th><th style="width:40px"></th></tr></thead><tbody>';
-    p.recipe.forEach((item) => {
-      const ing = STATE.ingredients.find((i) => i.id === item.ingredientId);
-      const lineCost = ing ? unitCost(ing) * item.usage : 0;
-      html += '<tr>';
-      html += '<td>' + (ing ? esc(ing.name) : '<span class="badge-required">削除済みの食材</span>') + '</td>';
-      html += '<td class="num">' + fmtNum(item.usage) + (ing ? esc(ing.unit) : '') + '</td>';
-      html += '<td class="num">' + yen(lineCost) + '</td>';
-      html += '<td><button class="icon-btn" data-action="remove-recipe-item" data-product-id="' + p.id + '" data-ingredient-id="' + item.ingredientId + '" title="削除" aria-label="削除">✕</button></td>';
-      html += '</tr>';
-    });
+    html += '<div class="table-wrap"><table class="data-table"><thead><tr><th>食材</th><th class="num">使用量/食</th><th class="num">原価</th><th style="width:64px"></th></tr></thead><tbody>';
+    p.recipe.forEach((item) => { html += recipeRowHtml(p, item); });
     html += '</tbody></table></div>';
   }
   html += '<form class="add-ingredient-row" data-form="add-recipe-item" data-product-id="' + p.id + '">';
   html += '<div class="field"><label>食材を追加</label>' + ingredientSelectHtml() + '</div>';
-  html += '<div class="field qty"><label>使用量/食</label><input type="number" name="usage" min="0" step="any" placeholder="例）5" required></div>';
+  html += '<div class="field qty"><label>使用量/食 <span class="unit-hint" data-role="unit-hint"></span></label><input type="number" name="usage" min="0" step="any" placeholder="例）5" required></div>';
   html += '<button class="btn sm" type="submit">＋ 追加</button>';
   html += '</form>';
   html += '</div>';
@@ -281,41 +323,54 @@ function productCardHtml(p) {
 
 function renderProductsTab() {
   const filter = ui.productFilter || 'active';
+  const tagFilter = ui.productTagFilter || 'all';
+  const search = (ui.productSearch || '').trim().toLowerCase();
   let list = STATE.products;
   if (filter === 'active') list = list.filter((p) => !p.archived);
   if (filter === 'archived') list = list.filter((p) => p.archived);
-  list = list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+  if (tagFilter !== 'all') list = list.filter((p) => (p.eventTag || '') === tagFilter);
+  if (search) list = list.filter((p) => p.name.toLowerCase().indexOf(search) !== -1 || (p.eventTag || '').toLowerCase().indexOf(search) !== -1);
+  const draggable = filter !== 'archived' && tagFilter === 'all' && !search;
+  list = list.slice().sort((a, b) => a.sortOrder - b.sortOrder);
 
   const activeCount = STATE.products.filter((p) => !p.archived).length;
   const archivedCount = STATE.products.filter((p) => p.archived).length;
+  const allTags = Array.from(new Set(STATE.products.map((p) => p.eventTag).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ja'));
 
   let html = '<section class="panel">';
+  html += datalistHtml('tag-presets', allTags);
   html += '<div class="card"><div class="card-header"><h2>新しい商品を追加</h2><span class="hint">コラボの新メニューをここから登録</span></div>';
-  html += '<div class="card-body"><form data-form="add-product" class="form-grid" style="grid-template-columns: 1fr auto;">';
+  html += '<div class="card-body"><form data-form="add-product" class="form-grid" style="grid-template-columns: 1fr 1fr auto;">';
   html += '<div class="field"><label for="new-product-name">商品名</label><input id="new-product-name" name="name" type="text" placeholder="例）ミントゼリーソーダ" required></div>';
+  html += '<div class="field"><label for="new-product-tag">コラボ回タグ（任意）</label><input id="new-product-tag" name="eventTag" type="text" list="tag-presets" placeholder="例）まほやくvol1"></div>';
   html += '<div class="form-actions"><button class="btn primary" type="submit">追加</button></div>';
   html += '</form></div></div>';
 
   html += '<div class="section-title"><h2>ラインナップ</h2><span class="count">' + activeCount + ' 提供中 ・ ' + archivedCount + ' アーカイブ</span></div>';
-  html += '<div class="chip-row">';
-  html += chipHtml('提供中', 'active', filter, 'filter-products');
-  html += chipHtml('すべて', 'all', filter, 'filter-products');
-  html += chipHtml('アーカイブ', 'archived', filter, 'filter-products');
+  html += '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:8px">';
+  html += '<div class="chip-row">' + chipHtml('提供中', 'active', filter, 'filter-products') + chipHtml('すべて', 'all', filter, 'filter-products') + chipHtml('アーカイブ', 'archived', filter, 'filter-products') + '</div>';
+  html += '<input type="search" id="product-search" class="field search-input" data-bind="product-search" placeholder="商品名・タグで検索" value="' + esc(ui.productSearch || '') + '">';
   html += '</div>';
+  if (allTags.length > 0) {
+    html += '<div class="chip-row" style="margin-bottom:16px">' + chipHtml('全コラボ', 'all', tagFilter, 'filter-product-tag');
+    allTags.forEach((t) => { html += chipHtml(t, t, tagFilter, 'filter-product-tag'); });
+    html += '</div>';
+  }
 
   if (list.length === 0) {
-    html += '<div class="card"><div class="card-body">' + emptyStateHtml('🧋', filter === 'archived' ? 'アーカイブされた商品はありません' : '商品がまだ登録されていません', filter === 'archived' ? '商品をアーカイブすると、ここに保存されて後から呼び戻せます。' : '上のフォームから商品を追加してください。') + '</div></div>';
+    html += '<div class="card"><div class="card-body">' + emptyStateHtml('🧋', filter === 'archived' ? 'アーカイブされた商品はありません' : '一致する商品が見つかりません', filter === 'archived' ? '商品をアーカイブすると、ここに保存されて後から呼び戻せます。' : '上のフォームから商品を追加するか、検索条件を変えてください。') + '</div></div>';
   } else {
-    html += '<div class="product-list">';
-    list.forEach((p) => { html += productCardHtml(p); });
+    html += '<div class="product-list" data-drag-list="product">';
+    list.forEach((p) => { html += productCardHtml(p, draggable); });
     html += '</div>';
+    if (!draggable) html += '<p class="helper-text" style="margin-top:8px">絞り込み・検索をしていないときだけ、ドラッグで並び替えできます。</p>';
   }
   html += '</section>';
   return html;
 }
 
-function fieldHtml(type, name, label, placeholder, required) {
-  return '<div class="field"><label for="new-' + name + '">' + esc(label) + '</label><input id="new-' + name + '" name="' + name + '" type="' + type + '" placeholder="' + esc(placeholder) + '"' + (required ? ' required' : '') + (type === 'number' ? ' step="any" min="0"' : '') + '></div>';
+function fieldHtml(type, name, label, placeholder, required, extraAttrs) {
+  return '<div class="field"><label for="new-' + name + '">' + esc(label) + '</label><input id="new-' + name + '" name="' + name + '" type="' + type + '" placeholder="' + esc(placeholder) + '"' + (required ? ' required' : '') + (type === 'number' ? ' step="any" min="0"' : '') + (extraAttrs || '') + '></div>';
 }
 
 function addIngredientFormHtml() {
@@ -325,13 +380,13 @@ function addIngredientFormHtml() {
     fieldHtml('text', 'unit', '単位', 'g / ml / 個', true) +
     fieldHtml('number', 'purchaseQty', '仕入れ量', '例）50', true) +
     fieldHtml('number', 'price', '値段（仕入れ量あたり）', '例）300', true) +
-    fieldHtml('text', 'supplier', '発注先', '例）〇〇青果', false) +
-    fieldHtml('text', 'leadTime', '納品までの時間', '例）翌日', false) +
+    fieldHtml('text', 'supplier', '発注先', '例）〇〇青果', false, ' list="supplier-presets"') +
+    fieldHtml('text', 'leadTime', '納品までの時間', '例）翌日', false, ' list="leadtime-presets"') +
     '<div class="form-actions"><button class="btn primary" type="submit">追加</button></div>' +
     '</form></div></div>';
 }
 
-function ingredientRowHtml(ing) {
+function ingredientRowHtml(ing, draggable) {
   const editing = ui.editingIngredientId === ing.id;
   const usedIn = STATE.products.filter((p) => p.recipe.some((r) => r.ingredientId === ing.id));
   if (editing) {
@@ -340,14 +395,14 @@ function ingredientRowHtml(ing) {
       '<td><input type="number" id="ei-purchaseQty-' + ing.id + '" value="' + ing.purchaseQty + '" step="any" min="0" style="width:70px" class="num"> <input type="text" id="ei-unit-' + ing.id + '" value="' + esc(ing.unit) + '" style="width:44px"></td>' +
       '<td><input type="number" id="ei-price-' + ing.id + '" value="' + ing.price + '" step="any" min="0" style="width:90px" class="num"></td>' +
       '<td class="num">' + yenUnit(unitCost(ing)) + '/' + esc(ing.unit) + '</td>' +
-      '<td><input type="text" id="ei-supplier-' + ing.id + '" value="' + esc(ing.supplier || '') + '" style="width:110px"></td>' +
-      '<td><input type="text" id="ei-leadTime-' + ing.id + '" value="' + esc(ing.leadTime || '') + '" style="width:90px"></td>' +
+      '<td><input type="text" id="ei-supplier-' + ing.id + '" value="' + esc(ing.supplier || '') + '" list="supplier-presets" style="width:110px"></td>' +
+      '<td><input type="text" id="ei-leadTime-' + ing.id + '" value="' + esc(ing.leadTime || '') + '" list="leadtime-presets" style="width:90px"></td>' +
       '<td><span class="pill ' + (ing.archived ? 'archived' : 'active') + '">' + (ing.archived ? 'アーカイブ' : '使用中') + '</span></td>' +
       '<td style="white-space:nowrap"><button class="btn sm primary" data-action="save-ingredient" data-id="' + ing.id + '">保存</button> <button class="btn sm ghost" data-action="cancel-edit-ingredient">戻す</button></td>' +
       '</tr>';
   }
-  return '<tr class="' + (ing.archived ? 'is-archived' : '') + '" data-ingredient-id="' + ing.id + '">' +
-    '<td>' + esc(ing.name) + (usedIn.length ? '<div class="helper-text">' + usedIn.length + '商品で使用中</div>' : '') + '</td>' +
+  return '<tr class="' + (ing.archived ? 'is-archived' : '') + '" data-drag-id="' + ing.id + '" data-drag-kind="ingredient"' + (draggable ? ' draggable="true"' : '') + '>' +
+    '<td>' + (draggable ? '<span class="drag-handle" title="ドラッグで並び替え">⠿</span> ' : '') + esc(ing.name) + (usedIn.length ? '<div class="helper-text">' + usedIn.length + '商品で使用中</div>' : '') + '</td>' +
     '<td class="num">' + fmtNum(ing.purchaseQty) + esc(ing.unit) + '</td>' +
     '<td class="num">' + yen(ing.price) + '</td>' +
     '<td class="num">' + yenUnit(unitCost(ing)) + '/' + esc(ing.unit) + '</td>' +
@@ -361,35 +416,68 @@ function ingredientRowHtml(ing) {
     '</td></tr>';
 }
 
+const INGREDIENT_SORTERS = {
+  manual: (a, b) => a.sortOrder - b.sortOrder,
+  priceDesc: (a, b) => b.price - a.price,
+  priceAsc: (a, b) => a.price - b.price,
+  leadTimeAsc: (a, b) => leadTimeRank(a.leadTime) - leadTimeRank(b.leadTime) || a.name.localeCompare(b.name, 'ja'),
+  leadTimeDesc: (a, b) => leadTimeRank(b.leadTime) - leadTimeRank(a.leadTime) || a.name.localeCompare(b.name, 'ja'),
+  status: (a, b) => (a.archived === b.archived ? 0 : a.archived ? 1 : -1) || a.name.localeCompare(b.name, 'ja'),
+};
+
+function ingredientSortSelectHtml() {
+  const options = [
+    ['manual', '手動（並び順）'],
+    ['priceDesc', '値段が高い順'],
+    ['priceAsc', '値段が低い順'],
+    ['leadTimeAsc', '納品が早い順'],
+    ['leadTimeDesc', '納品が遅い順'],
+    ['status', '使用中を上に'],
+  ];
+  let html = '<select id="ingredient-sort" data-bind="ingredient-sort" class="field sort-select">';
+  options.forEach((o) => {
+    html += '<option value="' + o[0] + '"' + (ui.ingredientSort === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+  });
+  html += '</select>';
+  return html;
+}
+
 function renderIngredientsTab() {
   const filter = ui.ingredientFilter || 'active';
   const search = (ui.ingredientSearch || '').trim().toLowerCase();
+  const sortKey = ui.ingredientSort || 'manual';
   let list = STATE.ingredients;
   if (filter === 'active') list = list.filter((i) => !i.archived);
   if (filter === 'archived') list = list.filter((i) => i.archived);
   if (search) list = list.filter((i) => i.name.toLowerCase().indexOf(search) !== -1 || (i.supplier || '').toLowerCase().indexOf(search) !== -1);
-  list = list.slice().sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+  const draggable = sortKey === 'manual' && filter !== 'archived' && !search;
+  list = list.slice().sort(INGREDIENT_SORTERS[sortKey] || INGREDIENT_SORTERS.manual);
 
   const activeCount = STATE.ingredients.filter((i) => !i.archived).length;
   const archivedCount = STATE.ingredients.filter((i) => i.archived).length;
 
   let html = '<section class="panel">';
+  html += datalistHtml('supplier-presets', SUPPLIER_PRESETS);
+  html += datalistHtml('leadtime-presets', LEAD_TIME_PRESETS);
   html += addIngredientFormHtml();
 
   html += '<div class="section-title"><h2>食材マスタ</h2><span class="count">' + activeCount + ' 使用中 ・ ' + archivedCount + ' アーカイブ</span></div>';
   html += '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between">';
   html += '<div class="chip-row">' + chipHtml('使用中', 'active', filter, 'filter-ingredients') + chipHtml('すべて', 'all', filter, 'filter-ingredients') + chipHtml('アーカイブ', 'archived', filter, 'filter-ingredients') + '</div>';
+  html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">';
+  html += ingredientSortSelectHtml();
   html += '<input type="search" id="ingredient-search" class="field search-input" data-bind="ingredient-search" placeholder="食材名・発注先で検索" value="' + esc(ui.ingredientSearch || '') + '">';
-  html += '</div>';
+  html += '</div></div>';
 
   if (list.length === 0) {
     html += '<div class="card"><div class="card-body">' + emptyStateHtml('🌿', search ? '一致する食材が見つかりません' : '食材がまだ登録されていません', search ? '検索語を変えてお試しください。' : '上のフォームから、ミントやゼリーなどの食材を登録しましょう。一度登録すれば、次のコラボでも使い回せます。') + '</div></div>';
   } else {
     html += '<div class="table-wrap"><table class="data-table"><thead><tr>';
     html += '<th>食材名</th><th class="num">仕入れ量</th><th class="num">値段</th><th class="num">単価</th><th>発注先</th><th>納品まで</th><th>状態</th><th></th>';
-    html += '</tr></thead><tbody>';
-    list.forEach((ing) => { html += ingredientRowHtml(ing); });
+    html += '</tr></thead><tbody data-drag-list="ingredient">';
+    list.forEach((ing) => { html += ingredientRowHtml(ing, draggable); });
     html += '</tbody></table></div>';
+    if (!draggable) html += '<p class="helper-text" style="margin-top:8px">「手動」並び替え・絞り込みなしのときだけ、ドラッグで並び替えできます。</p>';
   }
   html += '</section>';
   return html;
@@ -597,6 +685,72 @@ function toggleProductArchived(id) {
   mutate('toggleArchiveProduct', { id });
 }
 
+// ---- Drag & drop reordering -------------------------------------------
+function currentFullIds(kind) {
+  if (kind === 'ingredient') return STATE.ingredients.slice().sort((a, b) => a.sortOrder - b.sortOrder).map((i) => i.id);
+  return STATE.products.slice().sort((a, b) => a.sortOrder - b.sortOrder).map((p) => p.id);
+}
+
+function commitReorder(kind, orderedIds) {
+  mutate(kind === 'ingredient' ? 'reorderIngredients' : 'reorderProducts', { orderedIds });
+}
+
+document.addEventListener('dragstart', (e) => {
+  const el = e.target.closest('[data-drag-id]');
+  if (!el || el.getAttribute('draggable') !== 'true') return;
+  dragSource = { kind: el.dataset.dragKind, id: el.dataset.dragId };
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', el.dataset.dragId); } catch (err) { /* ignore */ }
+  el.classList.add('dragging');
+});
+
+document.addEventListener('dragend', (e) => {
+  const el = e.target.closest('[data-drag-id]');
+  if (el) el.classList.remove('dragging');
+  document.querySelectorAll('.drag-over-before, .drag-over-after').forEach((n) => n.classList.remove('drag-over-before', 'drag-over-after'));
+});
+
+document.addEventListener('dragenter', (e) => {
+  if (!dragSource) return;
+  const el = e.target.closest('[data-drag-id]');
+  if (!el || el.dataset.dragKind !== dragSource.kind) return;
+  e.preventDefault();
+});
+
+document.addEventListener('dragover', (e) => {
+  if (!dragSource) return;
+  const el = e.target.closest('[data-drag-id]');
+  if (!el || el.dataset.dragKind !== dragSource.kind) return;
+  e.preventDefault();
+  document.querySelectorAll('.drag-over-before, .drag-over-after').forEach((n) => {
+    if (n !== el) n.classList.remove('drag-over-before', 'drag-over-after');
+  });
+  const rect = el.getBoundingClientRect();
+  const before = (e.clientY - rect.top) < rect.height / 2;
+  el.classList.toggle('drag-over-before', before);
+  el.classList.toggle('drag-over-after', !before);
+});
+
+document.addEventListener('drop', (e) => {
+  if (!dragSource) return;
+  const el = e.target.closest('[data-drag-id]');
+  document.querySelectorAll('.drag-over-before, .drag-over-after').forEach((n) => n.classList.remove('drag-over-before', 'drag-over-after'));
+  if (!el || el.dataset.dragKind !== dragSource.kind) { dragSource = null; return; }
+  e.preventDefault();
+  const targetId = el.dataset.dragId;
+  const draggedId = dragSource.id;
+  dragSource = null;
+  if (targetId === draggedId) return;
+  const rect = el.getBoundingClientRect();
+  const before = (e.clientY - rect.top) < rect.height / 2;
+  const kind = el.dataset.dragKind;
+  const ids = currentFullIds(kind).filter((id) => id !== draggedId);
+  const idx = ids.indexOf(targetId);
+  const insertAt = before ? idx : idx + 1;
+  ids.splice(insertAt, 0, draggedId);
+  commitReorder(kind, ids);
+});
+
 document.addEventListener('click', (e) => {
   const tabBtn = e.target.closest('.tab-btn');
   if (tabBtn) {
@@ -615,28 +769,51 @@ document.addEventListener('click', (e) => {
   } else if (action === 'filter-products') {
     ui.productFilter = actionEl.dataset.value;
     render();
+  } else if (action === 'filter-product-tag') {
+    ui.productTagFilter = actionEl.dataset.value;
+    render();
   } else if (action === 'filter-ingredients') {
     ui.ingredientFilter = actionEl.dataset.value;
     render();
-  } else if (action === 'edit-product-name') {
-    ui.editingProductName = actionEl.dataset.id;
+  } else if (action === 'edit-product-meta') {
+    ui.editingProductId = actionEl.dataset.id;
     render();
     focusSoon('edit-product-name-' + actionEl.dataset.id);
-  } else if (action === 'cancel-edit-product-name') {
-    ui.editingProductName = null;
+  } else if (action === 'cancel-edit-product-meta') {
+    ui.editingProductId = null;
     render();
-  } else if (action === 'save-product-name') {
+  } else if (action === 'save-product-meta') {
     const id = actionEl.dataset.id;
-    const input = document.getElementById('edit-product-name-' + id);
-    const val = input ? input.value.trim() : '';
-    if (val) {
-      ui.editingProductName = null;
-      mutate('updateProductName', { id, name: val });
+    const nameInput = document.getElementById('edit-product-name-' + id);
+    const tagInput = document.getElementById('edit-product-tag-' + id);
+    const name = nameInput ? nameInput.value.trim() : '';
+    const eventTag = tagInput ? tagInput.value.trim() : '';
+    if (name) {
+      ui.editingProductId = null;
+      mutate('updateProduct', { id, name, eventTag });
     }
   } else if (action === 'archive-product') {
     toggleProductArchived(actionEl.dataset.id);
   } else if (action === 'unarchive-product') {
     toggleProductArchived(actionEl.dataset.id);
+  } else if (action === 'edit-recipe-item') {
+    ui.editingRecipeItem = { productId: actionEl.dataset.productId, ingredientId: actionEl.dataset.ingredientId };
+    render();
+    focusSoon('ri-usage-' + actionEl.dataset.productId + '-' + actionEl.dataset.ingredientId);
+  } else if (action === 'cancel-edit-recipe-item') {
+    ui.editingRecipeItem = null;
+    render();
+  } else if (action === 'save-recipe-item') {
+    const productId = actionEl.dataset.productId;
+    const ingredientId = actionEl.dataset.ingredientId;
+    const input = document.getElementById('ri-usage-' + productId + '-' + ingredientId);
+    const usage = Number(input ? input.value : NaN);
+    if (!(usage > 0)) {
+      showToast('使用量を正しく入力してください', true);
+      return;
+    }
+    ui.editingRecipeItem = null;
+    mutate('upsertRecipeItem', { productId, ingredientId, usage });
   } else if (action === 'remove-recipe-item') {
     mutate('removeRecipeItem', { productId: actionEl.dataset.productId, ingredientId: actionEl.dataset.ingredientId });
   } else if (action === 'edit-ingredient') {
@@ -700,8 +877,9 @@ document.addEventListener('submit', (e) => {
   } else if (kind === 'add-product') {
     const fd = new FormData(form);
     const name = (fd.get('name') || '').trim();
+    const eventTag = (fd.get('eventTag') || '').trim();
     if (!name) return;
-    mutate('addProduct', { name }).then((ok) => {
+    mutate('addProduct', { name, eventTag }).then((ok) => {
       if (ok) form.reset();
     });
   } else if (kind === 'add-recipe-item') {
@@ -716,8 +894,48 @@ document.addEventListener('submit', (e) => {
   }
 });
 
-document.addEventListener('input', (e) => {
+// Enter キーでフォーム送信（select や複数入力欄でも確実に動くように統一）。
+// IME変換の確定エンター（e.isComposing）は送信しない。
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.isComposing) return;
+  const form = e.target.closest('form[data-form]');
+  if (!form) return;
+  if (e.target.tagName === 'TEXTAREA') return;
+  e.preventDefault();
+  if (form.requestSubmit) form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+});
+
+// 数字の入力欄はフォーカス時に全選択して、すぐ上書きできるようにする。
+document.addEventListener('focus', (e) => {
   const el = e.target;
+  if (el && el.tagName === 'INPUT' && el.type === 'number' && el.select) {
+    el.select();
+  }
+}, true);
+
+// レシピ追加フォームで食材を選ぶと、その単位をヒント表示する。
+document.addEventListener('change', (e) => {
+  const select = e.target.closest('select.recipe-ingredient-select');
+  if (!select) return;
+  const form = select.closest('form[data-form="add-recipe-item"]');
+  if (!form) return;
+  const hint = form.querySelector('[data-role="unit-hint"]');
+  if (!hint) return;
+  const opt = select.selectedOptions[0];
+  const unit = opt ? opt.dataset.unit : '';
+  hint.textContent = unit ? '（単位：' + unit + '）' : '';
+});
+
+// IME変換中は再描画しない（変換候補がおかしくなるのを防ぐ）。
+// compositionend で最終的な値を反映して1回だけ再描画する。
+document.addEventListener('compositionstart', () => { composing = true; });
+document.addEventListener('compositionend', (e) => {
+  composing = false;
+  applyLiveInput(e.target);
+});
+
+function applyLiveInput(el) {
   if (!el || !el.dataset) return;
   if (el.dataset.bind === 'servings') {
     ui.servings[el.dataset.id] = el.value;
@@ -725,7 +943,22 @@ document.addEventListener('input', (e) => {
   } else if (el.id === 'ingredient-search') {
     ui.ingredientSearch = el.value;
     render();
+  } else if (el.id === 'product-search') {
+    ui.productSearch = el.value;
+    render();
+  } else if (el.id === 'ingredient-sort') {
+    ui.ingredientSort = el.value;
+    render();
   }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.isComposing || composing) return;
+  applyLiveInput(e.target);
 });
 
-init();
+// <select> の value 変更は環境によって input が発火しないことがあるため、
+// change でも同じ処理を通す（並び替えセレクトなど）。
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.tagName === 'SELECT') applyLiveInput(e.target);
+});
