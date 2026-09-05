@@ -491,3 +491,43 @@ table.data-table tr.editing { background: var(--mint-soft); }
   :root:not([data-theme="light"]) .gate-setup-notice code { background: rgba(255,255,255,0.1); }
 }
 :root[data-theme="dark"] .gate-setup-notice code { background: rgba(255,255,255,0.1); }
+
+/* ---- コラボ回タグ（ジャンル分けの目印） ---------------------------- */
+.tag-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #33261f;
+  white-space: nowrap;
+}
+
+/* ---- 並び替えセレクト ------------------------------------------------ */
+.sort-select { width: auto; max-width: 160px; }
+
+/* ---- 発注シミュレーション：食数入力欄を大きく・押しやすく --------- */
+.servings-input {
+  width: 100px;
+  font-size: 16px;
+  padding: 9px 10px;
+  text-align: right;
+}
+
+/* ---- ドラッグ＆ドロップでの並び替え ---------------------------------- */
+.drag-handle {
+  cursor: grab;
+  color: var(--faint-ink);
+  font-size: 15px;
+  padding: 0 2px;
+  user-select: none;
+  touch-action: none;
+}
+.drag-handle:active { cursor: grabbing; }
+[data-drag-id][draggable="true"] { cursor: grab; }
+[data-drag-id].dragging { opacity: 0.4; }
+.product-card[data-drag-id].drag-over-before { box-shadow: inset 0 3px 0 var(--mint); }
+.product-card[data-drag-id].drag-over-after { box-shadow: inset 0 -3px 0 var(--mint); }
+tr[data-drag-id].drag-over-before td { box-shadow: inset 0 2px 0 var(--mint); }
+tr[data-drag-id].drag-over-after td { box-shadow: inset 0 -2px 0 var(--mint); }
