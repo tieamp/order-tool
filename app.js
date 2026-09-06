@@ -272,18 +272,33 @@ function deleteButtonHtml(kind, id) {
   return '<button class="btn sm ghost" data-action="ask-delete" data-kind="' + kind + '" data-id="' + id + '">削除</button>';
 }
 
+function ingredientOptionHtml(ing) {
+  const label = esc(ing.name) + (ing.category === '資材' ? '［資材］' : '') + (ing.archived ? '（アーカイブ）' : '');
+  return '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '" data-purchase-qty="' + ing.purchaseQty + '" data-price="' + ing.price + '">' + label + '</option>';
+}
+
 function ingredientSelectHtml() {
-  const sorted = STATE.ingredients.slice().sort((a, b) => (a.archived === b.archived ? 0 : a.archived ? 1 : -1) || a.name.localeCompare(b.name, 'ja'));
-  if (sorted.length === 0) {
+  if (STATE.ingredients.length === 0) {
     return '<select name="ingredientId" disabled><option>先に食材を登録してください</option></select>';
   }
+  const byName = (a, b) => (a.archived === b.archived ? 0 : a.archived ? 1 : -1) || a.name.localeCompare(b.name, 'ja');
+  // 食材マスタで付けたジャンルごとに <optgroup> で分けて見やすくする。
+  // ジャンル未設定の食材は先頭に「未分類」としてまとめ、既存のジャンル設定順（プリセットの並び順）で続ける。
+  const genreOrder = presetValues('ingredientGenre');
+  const noGenre = STATE.ingredients.filter((i) => !i.genreTag).sort(byName);
+  const usedGenres = Array.from(new Set(STATE.ingredients.map((i) => i.genreTag).filter(Boolean)));
+  const orderedGenres = genreOrder.filter((g) => usedGenres.includes(g))
+    .concat(usedGenres.filter((g) => !genreOrder.includes(g)).sort((a, b) => a.localeCompare(b, 'ja')));
+
   // change イベントの委譲だけに頼らず、選んだ瞬間に確実に単位や仕入れ情報を表示するため
   // インラインの onchange も併用する（単位ヒントが反映されない不具合の対策）。
   const onchange = "updateIngredientPickHint(this);";
   let html = '<select name="ingredientId" class="recipe-ingredient-select" required onchange="' + onchange + '"><option value="">選択してください</option>';
-  sorted.forEach((ing) => {
-    const label = esc(ing.name) + (ing.category === '資材' ? '［資材］' : '') + (ing.archived ? '（アーカイブ）' : '');
-    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '" data-purchase-qty="' + ing.purchaseQty + '" data-price="' + ing.price + '">' + label + '</option>';
+  noGenre.forEach((ing) => { html += ingredientOptionHtml(ing); });
+  orderedGenres.forEach((genre) => {
+    html += '<optgroup label="' + esc(genre) + '">';
+    STATE.ingredients.filter((i) => i.genreTag === genre).sort(byName).forEach((ing) => { html += ingredientOptionHtml(ing); });
+    html += '</optgroup>';
   });
   html += '</select>';
   return html;
