@@ -277,16 +277,38 @@ function ingredientSelectHtml() {
   if (sorted.length === 0) {
     return '<select name="ingredientId" disabled><option>先に食材を登録してください</option></select>';
   }
-  // change イベントの委譲だけに頼らず、選んだ瞬間に確実に単位を表示するため
+  // change イベントの委譲だけに頼らず、選んだ瞬間に確実に単位や仕入れ情報を表示するため
   // インラインの onchange も併用する（単位ヒントが反映されない不具合の対策）。
-  const onchange = "var h=this.closest('form').querySelector('[data-role=unit-hint]'); var o=this.selectedOptions[0]; if(h) h.textContent = (o&&o.dataset.unit) ? '（単位：'+o.dataset.unit+'）' : '';";
+  const onchange = "updateIngredientPickHint(this);";
   let html = '<select name="ingredientId" class="recipe-ingredient-select" required onchange="' + onchange + '"><option value="">選択してください</option>';
   sorted.forEach((ing) => {
     const label = esc(ing.name) + (ing.category === '資材' ? '［資材］' : '') + (ing.archived ? '（アーカイブ）' : '');
-    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '">' + label + '</option>';
+    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '" data-purchase-qty="' + ing.purchaseQty + '" data-price="' + ing.price + '">' + label + '</option>';
   });
   html += '</select>';
   return html;
+}
+
+// レシピ追加フォームで食材を選んだときに、単位・仕入れ量・値段・単価のヒントを更新する。
+// インラインの onchange と change イベント委譲の両方から呼ばれる共通処理。
+function updateIngredientPickHint(select) {
+  const form = select.closest('form');
+  if (!form) return;
+  const unitHint = form.querySelector('[data-role="unit-hint"]');
+  const infoHint = form.querySelector('[data-role="ingredient-info-hint"]');
+  const opt = select.selectedOptions[0];
+  const unit = opt ? opt.dataset.unit : '';
+  if (unitHint) unitHint.textContent = unit ? '（単位：' + unit + '）' : '';
+  if (infoHint) {
+    if (opt && opt.value) {
+      const purchaseQty = Number(opt.dataset.purchaseQty) || 0;
+      const price = Number(opt.dataset.price) || 0;
+      const perUnit = purchaseQty > 0 ? price / purchaseQty : 0;
+      infoHint.textContent = '仕入れ量：' + fmtNum(purchaseQty) + unit + '　値段：' + yen(price) + '　単価：' + yenUnit(perUnit) + '/' + unit;
+    } else {
+      infoHint.textContent = '';
+    }
+  }
 }
 
 function recipeRowHtml(p, item) {
@@ -354,7 +376,7 @@ function productCardHtml(p, draggable) {
     html += '</tbody></table></div>';
   }
   html += '<form class="add-ingredient-row" data-form="add-recipe-item" data-product-id="' + p.id + '">';
-  html += '<div class="field"><label>食材を追加</label>' + ingredientSelectHtml() + '</div>';
+  html += '<div class="field"><label>食材を追加</label>' + ingredientSelectHtml() + '<div class="helper-text" data-role="ingredient-info-hint"></div></div>';
   html += '<div class="field qty"><label>使用量/食 <span class="unit-hint" data-role="unit-hint"></span></label><input type="number" name="usage" min="0" step="any" placeholder="例）5" required></div>';
   html += '<button class="btn sm" type="submit">＋ 追加</button>';
   html += '</form>';
@@ -1035,17 +1057,13 @@ document.addEventListener('focus', (e) => {
   }
 }, true);
 
-// レシピ追加フォームで食材を選ぶと、その単位をヒント表示する。
+// レシピ追加フォームで食材を選ぶと、その単位・仕入れ情報をヒント表示する。
 document.addEventListener('change', (e) => {
   const select = e.target.closest('select.recipe-ingredient-select');
   if (!select) return;
   const form = select.closest('form[data-form="add-recipe-item"]');
   if (!form) return;
-  const hint = form.querySelector('[data-role="unit-hint"]');
-  if (!hint) return;
-  const opt = select.selectedOptions[0];
-  const unit = opt ? opt.dataset.unit : '';
-  hint.textContent = unit ? '（単位：' + unit + '）' : '';
+  updateIngredientPickHint(select);
 });
 
 // IME変換中は再描画しない（変換候補がおかしくなるのを防ぐ）。
