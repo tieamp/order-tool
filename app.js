@@ -38,13 +38,24 @@ async function apiWrite(action, payload) {
   return res.json();
 }
 
-// ---- Presets ---------------------------------------------------------
-const SUPPLIER_PRESETS = ['めいらく', 'UCC', 'ミクリード', '桶谷', 'Amazon', '楽天', '富澤商店'];
-const LEAD_TIME_PRESETS = ['翌日', '2日後', '3日後', '5日後', '1週間後', '2週間以上'];
+// ---- Presets -----------------------------------------------------------
+// 発注先・納品日・食材ジャンルの選択肢は、以前はコードに固定で書いていたが、
+// 今は「食材マスタ」タブの管理パネルから自由に追加・削除できる
+// （バックエンドの Presets シートに保存される）。
 const TAG_PALETTE = ['#E7C6D9', '#C9E4DE', '#F6E4B6', '#C6DDF0', '#E3D5CA', '#D6E2E9', '#F1D1B5'];
+const PRESET_LABELS = { supplier: '発注先', leadTime: '納品日', ingredientGenre: '食材ジャンル' };
+const PRESET_TYPES_ORDER = ['supplier', 'leadTime', 'ingredientGenre'];
+const INGREDIENT_CATEGORIES = ['食材', '資材'];
+
+function presetList(type) {
+  return (STATE.presets && STATE.presets[type]) || [];
+}
+function presetValues(type) {
+  return presetList(type).map((p) => p.value);
+}
 
 function leadTimeRank(lt) {
-  const idx = LEAD_TIME_PRESETS.indexOf(String(lt || ''));
+  const idx = presetValues('leadTime').indexOf(String(lt || ''));
   return idx === -1 ? 999 : idx;
 }
 
@@ -61,7 +72,7 @@ function datalistHtml(id, options) {
 }
 
 // ---- App state --------------------------------------------------------
-let STATE = { ingredients: [], products: [] };
+let STATE = { ingredients: [], products: [], presets: { supplier: [], leadTime: [], ingredientGenre: [] } };
 let inFlight = false;
 let composing = false;
 let dragSource = null; // { kind: 'ingredient' | 'product', id }
@@ -75,6 +86,7 @@ const ui = {
   ingredientFilter: 'active',
   ingredientSearch: '',
   ingredientSort: 'manual',
+  ingredientTagFilter: 'all',
   editingProductId: null,
   editingIngredientId: null,
   editingRecipeItem: null, // { productId, ingredientId }
@@ -112,12 +124,35 @@ function unitCost(ing) {
   return ing.price / ing.purchaseQty;
 }
 
+// 原価（全部） = 食材＋資材（カトラリー等）を含む、発注シミュレーションで使う原価。
 function productCostPerServing(product) {
   return product.recipe.reduce((sum, item) => {
     const ing = STATE.ingredients.find((i) => i.id === item.ingredientId);
     if (!ing) return sum;
     return sum + unitCost(ing) * item.usage;
   }, 0);
+}
+
+// 原価（食材のみ） = category が「資材」のものを除いた原価。原価率①に使う。
+function productFoodCostPerServing(product) {
+  return product.recipe.reduce((sum, item) => {
+    const ing = STATE.ingredients.find((i) => i.id === item.ingredientId);
+    if (!ing || ing.category === '資材') return sum;
+    return sum + unitCost(ing) * item.usage;
+  }, 0);
+}
+
+function costRatioHtml(product) {
+  if (!(product.sellingPrice > 0)) {
+    return '<span class="helper-text">販売価格未設定（編集から設定すると原価率が出ます）</span>';
+  }
+  const foodCost = productFoodCostPerServing(product);
+  const allCost = productCostPerServing(product);
+  const ratio1 = (foodCost / product.sellingPrice) * 100;
+  const ratio2 = (allCost / product.sellingPrice) * 100;
+  return '<span class="product-cost-badge" title="食材のみの原価に対して">原価率① ' + fmtNum(ratio1, 1) + '%</span>' +
+    '<span class="product-cost-badge" title="食材＋カトラリーの原価に対して">原価率② ' + fmtNum(ratio2, 1) + '%</span>' +
+    '<span class="helper-text">販売価格 ' + yen(product.sellingPrice) + '</span>';
 }
 
 function computeOrderPlan() {
@@ -191,7 +226,7 @@ function renderOrderTab() {
       html += '<tr>';
       html += '<td>' + esc(p.name) + (p.eventTag ? ' <span class="tag-pill" style="background:' + tagColor(p.eventTag) + '">' + esc(p.eventTag) + '</span>' : '') + '</td>';
       html += '<td class="num">' + yen(cost) + '</td>';
-      html += '<td><input type="number" min="0" step="1" inputmode="numeric" id="servings-' + p.id + '" data-bind="servings" data-id="' + p.id + '" value="' + esc(servingsVal) + '" placeholder="0" class="num servings-input"></td>';
+      html += '<td><input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" id="servings-' + p.id + '" data-bind="servings" data-id="' + p.id + '" value="' + esc(servingsVal) + '" placeholder="0" class="num servings-input"></td>';
       html += '<td class="num">' + (subtotal > 0 ? yen(subtotal) : '—') + '</td>';
       html += '</tr>';
     });
@@ -242,9 +277,13 @@ function ingredientSelectHtml() {
   if (sorted.length === 0) {
     return '<select name="ingredientId" disabled><option>先に食材を登録してください</option></select>';
   }
-  let html = '<select name="ingredientId" class="recipe-ingredient-select" required><option value="">選択してください</option>';
+  // change イベントの委譲だけに頼らず、選んだ瞬間に確実に単位を表示するため
+  // インラインの onchange も併用する（単位ヒントが反映されない不具合の対策）。
+  const onchange = "var h=this.closest('form').querySelector('[data-role=unit-hint]'); var o=this.selectedOptions[0]; if(h) h.textContent = (o&&o.dataset.unit) ? '（単位：'+o.dataset.unit+'）' : '';";
+  let html = '<select name="ingredientId" class="recipe-ingredient-select" required onchange="' + onchange + '"><option value="">選択してください</option>';
   sorted.forEach((ing) => {
-    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '">' + esc(ing.name) + (ing.archived ? '（アーカイブ）' : '') + '</option>';
+    const label = esc(ing.name) + (ing.category === '資材' ? '［資材］' : '') + (ing.archived ? '（アーカイブ）' : '');
+    html += '<option value="' + ing.id + '" data-unit="' + esc(ing.unit) + '">' + label + '</option>';
   });
   html += '</select>';
   return html;
@@ -262,8 +301,9 @@ function recipeRowHtml(p, item) {
       '</tr>';
   }
   const lineCost = ing ? unitCost(ing) * item.usage : 0;
+  const materialBadge = (ing && ing.category === '資材') ? ' <span class="pill" style="background:#eee;font-size:10px">資材</span>' : '';
   return '<tr>' +
-    '<td>' + (ing ? esc(ing.name) : '<span class="badge-required">削除済みの食材</span>') + '</td>' +
+    '<td>' + (ing ? esc(ing.name) : '<span class="badge-required">削除済みの食材</span>') + materialBadge + '</td>' +
     '<td class="num">' + fmtNum(item.usage) + (ing ? esc(ing.unit) : '') + '</td>' +
     '<td class="num">' + yen(lineCost) + '</td>' +
     '<td style="white-space:nowrap">' +
@@ -282,6 +322,7 @@ function productCardHtml(p, draggable) {
   if (editing) {
     html += '<input type="text" id="edit-product-name-' + p.id + '" value="' + esc(p.name) + '" style="font-family:var(--font-display);font-size:16px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;">';
     html += '<input type="text" id="edit-product-tag-' + p.id + '" value="' + esc(p.eventTag || '') + '" list="tag-presets" placeholder="コラボ回タグ（例：まほやくvol1）" style="font-size:13px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;">';
+    html += '<input type="number" id="edit-product-price-' + p.id + '" value="' + (p.sellingPrice || '') + '" min="0" step="1" placeholder="販売価格" class="num" style="width:100px;font-size:13px;padding:4px 8px;border:1px solid var(--line-strong);border-radius:6px;">';
     html += '<button class="btn sm primary" data-action="save-product-meta" data-id="' + p.id + '">保存</button>';
     html += '<button class="btn sm ghost" data-action="cancel-edit-product-meta">キャンセル</button>';
   } else {
@@ -291,8 +332,9 @@ function productCardHtml(p, draggable) {
     html += '<span class="pill ' + (p.archived ? 'archived' : 'active') + '">' + (p.archived ? 'アーカイブ' : '提供中') + '</span>';
   }
   html += '</div>';
-  html += '<div style="display:flex;align-items:center;gap:10px">';
+  html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">';
   html += '<span class="product-cost-badge">原価 ' + yen(cost) + ' / 食</span>';
+  html += costRatioHtml(p);
   html += '<div class="product-actions">';
   if (p.archived) {
     html += '<button class="btn sm mint" data-action="unarchive-product" data-id="' + p.id + '">ラインナップに戻す</button>';
@@ -330,7 +372,9 @@ function renderProductsTab() {
   if (filter === 'archived') list = list.filter((p) => p.archived);
   if (tagFilter !== 'all') list = list.filter((p) => (p.eventTag || '') === tagFilter);
   if (search) list = list.filter((p) => p.name.toLowerCase().indexOf(search) !== -1 || (p.eventTag || '').toLowerCase().indexOf(search) !== -1);
-  const draggable = filter !== 'archived' && tagFilter === 'all' && !search;
+  // 並べ替え(ドラッグ)は、全体の並び順(sortOrder)を直接動かす仕組みなので、
+  // 絞り込み・検索をしていても常に有効。
+  const draggable = true;
   list = list.slice().sort((a, b) => a.sortOrder - b.sortOrder);
 
   const activeCount = STATE.products.filter((p) => !p.archived).length;
@@ -340,9 +384,10 @@ function renderProductsTab() {
   let html = '<section class="panel">';
   html += datalistHtml('tag-presets', allTags);
   html += '<div class="card"><div class="card-header"><h2>新しい商品を追加</h2><span class="hint">コラボの新メニューをここから登録</span></div>';
-  html += '<div class="card-body"><form data-form="add-product" class="form-grid" style="grid-template-columns: 1fr 1fr auto;">';
+  html += '<div class="card-body"><form data-form="add-product" class="form-grid" style="grid-template-columns: 1fr 1fr 1fr auto;">';
   html += '<div class="field"><label for="new-product-name">商品名</label><input id="new-product-name" name="name" type="text" placeholder="例）ミントゼリーソーダ" required></div>';
   html += '<div class="field"><label for="new-product-tag">コラボ回タグ（任意）</label><input id="new-product-tag" name="eventTag" type="text" list="tag-presets" placeholder="例）まほやくvol1"></div>';
+  html += '<div class="field"><label for="new-product-price">販売価格（任意）</label><input id="new-product-price" name="sellingPrice" type="number" min="0" step="1" placeholder="例）600"></div>';
   html += '<div class="form-actions"><button class="btn primary" type="submit">追加</button></div>';
   html += '</form></div></div>';
 
@@ -363,7 +408,6 @@ function renderProductsTab() {
     html += '<div class="product-list" data-drag-list="product">';
     list.forEach((p) => { html += productCardHtml(p, draggable); });
     html += '</div>';
-    if (!draggable) html += '<p class="helper-text" style="margin-top:8px">絞り込み・検索をしていないときだけ、ドラッグで並び替えできます。</p>';
   }
   html += '</section>';
   return html;
@@ -371,6 +415,15 @@ function renderProductsTab() {
 
 function fieldHtml(type, name, label, placeholder, required, extraAttrs) {
   return '<div class="field"><label for="new-' + name + '">' + esc(label) + '</label><input id="new-' + name + '" name="' + name + '" type="' + type + '" placeholder="' + esc(placeholder) + '"' + (required ? ' required' : '') + (type === 'number' ? ' step="any" min="0"' : '') + (extraAttrs || '') + '></div>';
+}
+
+function categorySelectHtml(id, current) {
+  let html = '<select id="' + id + '" style="font-size:12px">';
+  INGREDIENT_CATEGORIES.forEach((c) => {
+    html += '<option value="' + c + '"' + (current === c ? ' selected' : '') + '>' + c + '</option>';
+  });
+  html += '</select>';
+  return html;
 }
 
 function addIngredientFormHtml() {
@@ -382,6 +435,8 @@ function addIngredientFormHtml() {
     fieldHtml('number', 'price', '値段（仕入れ量あたり）', '例）300', true) +
     fieldHtml('text', 'supplier', '発注先', '例）〇〇青果', false, ' list="supplier-presets"') +
     fieldHtml('text', 'leadTime', '納品までの時間', '例）翌日', false, ' list="leadtime-presets"') +
+    '<div class="field"><label for="new-category">分類</label><select id="new-category" name="category"><option value="食材">食材</option><option value="資材">資材（カトラリー・備品など）</option></select></div>' +
+    fieldHtml('text', 'genreTag', 'ジャンル（任意）', '例）乳製品', false, ' list="genre-presets"') +
     '<div class="form-actions"><button class="btn primary" type="submit">追加</button></div>' +
     '</form></div></div>';
 }
@@ -391,7 +446,9 @@ function ingredientRowHtml(ing, draggable) {
   const usedIn = STATE.products.filter((p) => p.recipe.some((r) => r.ingredientId === ing.id));
   if (editing) {
     return '<tr class="editing" data-ingredient-id="' + ing.id + '">' +
-      '<td><input type="text" id="ei-name-' + ing.id + '" value="' + esc(ing.name) + '" style="width:140px"></td>' +
+      '<td><input type="text" id="ei-name-' + ing.id + '" value="' + esc(ing.name) + '" style="width:140px"><br>' +
+      categorySelectHtml('ei-category-' + ing.id, ing.category) +
+      ' <input type="text" id="ei-genreTag-' + ing.id + '" value="' + esc(ing.genreTag || '') + '" list="genre-presets" placeholder="ジャンル" style="width:80px;font-size:12px;margin-top:4px"></td>' +
       '<td><input type="number" id="ei-purchaseQty-' + ing.id + '" value="' + ing.purchaseQty + '" step="any" min="0" style="width:70px" class="num"> <input type="text" id="ei-unit-' + ing.id + '" value="' + esc(ing.unit) + '" style="width:44px"></td>' +
       '<td><input type="number" id="ei-price-' + ing.id + '" value="' + ing.price + '" step="any" min="0" style="width:90px" class="num"></td>' +
       '<td class="num">' + yenUnit(unitCost(ing)) + '/' + esc(ing.unit) + '</td>' +
@@ -401,8 +458,10 @@ function ingredientRowHtml(ing, draggable) {
       '<td style="white-space:nowrap"><button class="btn sm primary" data-action="save-ingredient" data-id="' + ing.id + '">保存</button> <button class="btn sm ghost" data-action="cancel-edit-ingredient">戻す</button></td>' +
       '</tr>';
   }
+  const materialBadge = ing.category === '資材' ? ' <span class="pill" style="background:#eee">資材</span>' : '';
+  const genreBadge = ing.genreTag ? ' <span class="tag-pill" style="background:' + tagColor(ing.genreTag) + '">' + esc(ing.genreTag) + '</span>' : '';
   return '<tr class="' + (ing.archived ? 'is-archived' : '') + '" data-drag-id="' + ing.id + '" data-drag-kind="ingredient"' + (draggable ? ' draggable="true"' : '') + '>' +
-    '<td>' + (draggable ? '<span class="drag-handle" title="ドラッグで並び替え">⠿</span> ' : '') + esc(ing.name) + (usedIn.length ? '<div class="helper-text">' + usedIn.length + '商品で使用中</div>' : '') + '</td>' +
+    '<td>' + (draggable ? '<span class="drag-handle" title="ドラッグで並び替え">⠿</span> ' : '') + esc(ing.name) + materialBadge + genreBadge + (usedIn.length ? '<div class="helper-text">' + usedIn.length + '商品で使用中</div>' : '') + '</td>' +
     '<td class="num">' + fmtNum(ing.purchaseQty) + esc(ing.unit) + '</td>' +
     '<td class="num">' + yen(ing.price) + '</td>' +
     '<td class="num">' + yenUnit(unitCost(ing)) + '/' + esc(ing.unit) + '</td>' +
@@ -442,23 +501,54 @@ function ingredientSortSelectHtml() {
   return html;
 }
 
+function presetChipsHtml(type) {
+  const items = presetList(type);
+  if (items.length === 0) return '<span class="helper-text">まだ登録されていません</span>';
+  return items.map((it) => '<span class="chip" style="display:inline-flex;align-items:center;gap:4px;cursor:default">' + esc(it.value) +
+    '<button class="icon-btn" data-action="delete-preset" data-id="' + it.id + '" title="削除" aria-label="' + esc(it.value) + 'を削除" style="font-size:11px;padding:0 2px;line-height:1">✕</button></span>').join(' ');
+}
+
+function presetsManagerHtml() {
+  let html = '<div class="card"><div class="card-header"><h2>選択肢の管理（発注先・納品日・食材ジャンル）</h2><span class="hint">ここで追加・削除した内容が、入力時の候補になります</span></div>';
+  html += '<div class="card-body" style="display:flex;flex-direction:column;gap:16px">';
+  PRESET_TYPES_ORDER.forEach((type) => {
+    const label = PRESET_LABELS[type];
+    html += '<div><div style="font-weight:600;margin-bottom:6px">' + esc(label) + '</div>';
+    html += '<div class="chip-row" style="margin-bottom:8px">' + presetChipsHtml(type) + '</div>';
+    html += '<form data-form="add-preset" data-preset-type="' + type + '" style="display:flex;gap:8px;max-width:320px">';
+    html += '<input type="text" name="value" placeholder="新しい' + esc(label) + 'を追加" style="flex:1">';
+    html += '<button class="btn sm" type="submit">追加</button>';
+    html += '</form></div>';
+  });
+  html += '</div></div>';
+  return html;
+}
+
 function renderIngredientsTab() {
   const filter = ui.ingredientFilter || 'active';
   const search = (ui.ingredientSearch || '').trim().toLowerCase();
   const sortKey = ui.ingredientSort || 'manual';
+  const tagFilter = ui.ingredientTagFilter || 'all';
   let list = STATE.ingredients;
   if (filter === 'active') list = list.filter((i) => !i.archived);
   if (filter === 'archived') list = list.filter((i) => i.archived);
+  if (tagFilter !== 'all') list = list.filter((i) => (i.genreTag || '') === tagFilter);
   if (search) list = list.filter((i) => i.name.toLowerCase().indexOf(search) !== -1 || (i.supplier || '').toLowerCase().indexOf(search) !== -1);
-  const draggable = sortKey === 'manual' && filter !== 'archived' && !search;
+  // 並べ替え(ドラッグ)は全体の並び順(sortOrder)を直接動かす仕組みなので、
+  // 絞り込み・検索をしていても常に有効。ただし「手動」以外のソートを
+  // 選んでいるときは、見た目の並びがそのソート基準で決まるため無効にする。
+  const draggable = sortKey === 'manual';
   list = list.slice().sort(INGREDIENT_SORTERS[sortKey] || INGREDIENT_SORTERS.manual);
 
   const activeCount = STATE.ingredients.filter((i) => !i.archived).length;
   const archivedCount = STATE.ingredients.filter((i) => i.archived).length;
+  const allGenres = Array.from(new Set(STATE.ingredients.map((i) => i.genreTag).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'ja'));
 
   let html = '<section class="panel">';
-  html += datalistHtml('supplier-presets', SUPPLIER_PRESETS);
-  html += datalistHtml('leadtime-presets', LEAD_TIME_PRESETS);
+  html += datalistHtml('supplier-presets', presetValues('supplier'));
+  html += datalistHtml('leadtime-presets', presetValues('leadTime'));
+  html += datalistHtml('genre-presets', presetValues('ingredientGenre'));
+  html += presetsManagerHtml();
   html += addIngredientFormHtml();
 
   html += '<div class="section-title"><h2>食材マスタ</h2><span class="count">' + activeCount + ' 使用中 ・ ' + archivedCount + ' アーカイブ</span></div>';
@@ -468,6 +558,11 @@ function renderIngredientsTab() {
   html += ingredientSortSelectHtml();
   html += '<input type="search" id="ingredient-search" class="field search-input" data-bind="ingredient-search" placeholder="食材名・発注先で検索" value="' + esc(ui.ingredientSearch || '') + '">';
   html += '</div></div>';
+  if (allGenres.length > 0) {
+    html += '<div class="chip-row" style="margin:8px 0 16px">' + chipHtml('全ジャンル', 'all', tagFilter, 'filter-ingredient-tag');
+    allGenres.forEach((t) => { html += chipHtml(t, t, tagFilter, 'filter-ingredient-tag'); });
+    html += '</div>';
+  }
 
   if (list.length === 0) {
     html += '<div class="card"><div class="card-body">' + emptyStateHtml('🌿', search ? '一致する食材が見つかりません' : '食材がまだ登録されていません', search ? '検索語を変えてお試しください。' : '上のフォームから、ミントやゼリーなどの食材を登録しましょう。一度登録すれば、次のコラボでも使い回せます。') + '</div></div>';
@@ -477,7 +572,7 @@ function renderIngredientsTab() {
     html += '</tr></thead><tbody data-drag-list="ingredient">';
     list.forEach((ing) => { html += ingredientRowHtml(ing, draggable); });
     html += '</tbody></table></div>';
-    if (!draggable) html += '<p class="helper-text" style="margin-top:8px">「手動」並び替え・絞り込みなしのときだけ、ドラッグで並び替えできます。</p>';
+    if (!draggable) html += '<p class="helper-text" style="margin-top:8px">「手動」の並び替えを選んでいるときだけ、ドラッグで並び替えできます。</p>';
   }
   html += '</section>';
   return html;
@@ -786,11 +881,13 @@ document.addEventListener('click', (e) => {
     const id = actionEl.dataset.id;
     const nameInput = document.getElementById('edit-product-name-' + id);
     const tagInput = document.getElementById('edit-product-tag-' + id);
+    const priceInput = document.getElementById('edit-product-price-' + id);
     const name = nameInput ? nameInput.value.trim() : '';
     const eventTag = tagInput ? tagInput.value.trim() : '';
+    const sellingPrice = priceInput ? Number(priceInput.value) || 0 : 0;
     if (name) {
       ui.editingProductId = null;
-      mutate('updateProduct', { id, name, eventTag });
+      mutate('updateProduct', { id, name, eventTag, sellingPrice });
     }
   } else if (action === 'archive-product') {
     toggleProductArchived(actionEl.dataset.id);
@@ -831,14 +928,23 @@ document.addEventListener('click', (e) => {
     const price = Number(document.getElementById('ei-price-' + id).value);
     const supplier = document.getElementById('ei-supplier-' + id).value.trim();
     const leadTime = document.getElementById('ei-leadTime-' + id).value.trim();
+    const categoryEl = document.getElementById('ei-category-' + id);
+    const genreTagEl = document.getElementById('ei-genreTag-' + id);
+    const category = categoryEl ? categoryEl.value : '食材';
+    const genreTag = genreTagEl ? genreTagEl.value.trim() : '';
     if (!name || !unit || !(purchaseQty > 0) || !(price >= 0)) {
       showToast('食材名・単位・仕入れ量・値段を正しく入力してください', true);
       return;
     }
     ui.editingIngredientId = null;
-    mutate('updateIngredient', { id, name, unit, purchaseQty, price, supplier, leadTime });
+    mutate('updateIngredient', { id, name, unit, purchaseQty, price, supplier, leadTime, category, genreTag });
   } else if (action === 'toggle-archive-ingredient') {
     mutate('toggleArchiveIngredient', { id: actionEl.dataset.id });
+  } else if (action === 'filter-ingredient-tag') {
+    ui.ingredientTagFilter = actionEl.dataset.value;
+    render();
+  } else if (action === 'delete-preset') {
+    mutate('deletePreset', { id: actionEl.dataset.id });
   } else if (action === 'ask-delete') {
     ui.confirmDelete = { kind: actionEl.dataset.kind, id: actionEl.dataset.id };
     render();
@@ -867,19 +973,22 @@ document.addEventListener('submit', (e) => {
     const price = Number(fd.get('price'));
     const supplier = (fd.get('supplier') || '').trim();
     const leadTime = (fd.get('leadTime') || '').trim();
+    const category = (fd.get('category') || '').trim() || '食材';
+    const genreTag = (fd.get('genreTag') || '').trim();
     if (!name || !unit || !(purchaseQty > 0) || !(price >= 0)) {
       showToast('食材名・単位・仕入れ量・値段を正しく入力してください', true);
       return;
     }
-    mutate('addIngredient', { name, unit, purchaseQty, price, supplier, leadTime }).then((ok) => {
+    mutate('addIngredient', { name, unit, purchaseQty, price, supplier, leadTime, category, genreTag }).then((ok) => {
       if (ok) form.reset();
     });
   } else if (kind === 'add-product') {
     const fd = new FormData(form);
     const name = (fd.get('name') || '').trim();
     const eventTag = (fd.get('eventTag') || '').trim();
+    const sellingPrice = Number(fd.get('sellingPrice')) || 0;
     if (!name) return;
-    mutate('addProduct', { name, eventTag }).then((ok) => {
+    mutate('addProduct', { name, eventTag, sellingPrice }).then((ok) => {
       if (ok) form.reset();
     });
   } else if (kind === 'add-recipe-item') {
@@ -891,6 +1000,14 @@ document.addEventListener('submit', (e) => {
       return;
     }
     mutate('upsertRecipeItem', { productId: form.dataset.productId, ingredientId, usage });
+  } else if (kind === 'add-preset') {
+    const fd = new FormData(form);
+    const value = (fd.get('value') || '').trim();
+    const type = form.dataset.presetType;
+    if (!value) return;
+    mutate('addPreset', { type, value }).then((ok) => {
+      if (ok) form.reset();
+    });
   }
 });
 
@@ -907,10 +1024,14 @@ document.addEventListener('keydown', (e) => {
 });
 
 // 数字の入力欄はフォーカス時に全選択して、すぐ上書きできるようにする。
+// type="number" は iOS Safari など一部ブラウザで .select() が使えず
+// （エラーになって握りつぶされ、見た目には何も選択されない）、それが原因で
+// 「食数が入力しにくい」状態になっていたため、食数欄は type="text" +
+// inputmode="numeric" にして確実に全選択できるようにしている。
 document.addEventListener('focus', (e) => {
   const el = e.target;
-  if (el && el.tagName === 'INPUT' && el.type === 'number' && el.select) {
-    el.select();
+  if (el && el.tagName === 'INPUT' && el.select && (el.type === 'number' || el.classList.contains('servings-input'))) {
+    try { el.select(); } catch (err) { /* 一部ブラウザでは選択できないことがある */ }
   }
 }, true);
 
@@ -938,7 +1059,10 @@ document.addEventListener('compositionend', (e) => {
 function applyLiveInput(el) {
   if (!el || !el.dataset) return;
   if (el.dataset.bind === 'servings') {
-    ui.servings[el.dataset.id] = el.value;
+    // 数字以外が混ざらないようにする（type="text"化に伴う簡易バリデーション）。
+    const cleaned = el.value.replace(/[^0-9]/g, '');
+    if (cleaned !== el.value) el.value = cleaned;
+    ui.servings[el.dataset.id] = cleaned;
     render();
   } else if (el.id === 'ingredient-search') {
     ui.ingredientSearch = el.value;
